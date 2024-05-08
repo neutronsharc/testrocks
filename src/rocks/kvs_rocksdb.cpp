@@ -1107,6 +1107,7 @@ int kvs_scan(kvs_handle_t *kvs, int cf_id) {
 	iter->Next();
   }
   delete iter;
+  return 0;
 }
 
 int kvs_put(kvs_handle_t *kvs,

@@ -1,0 +1,9 @@
+//////////////////////
+How to cmake
+
+At repo top dir,
+$ mkdir build
+$ cd build
+$ cmake -DCMAKE_BUILD_TYPE=Release ..;   make -j8
+or,
+$ cmake -DCMAKE_BUILD_TYPE=Debug ..;   make -j8
