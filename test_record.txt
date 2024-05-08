@@ -1,0 +1,162 @@
+
+
+
+///////////////////////////////////////////////////////////
+with meta wal-write callback:
+
+
+
+----- 1 syncer thread
+[2024-05-08 18:53:53.106290+00:00][info][13933 wb_syncer_0]syncer_0 finished, has written objs=50000 in 35.212988 sec, iops=1419.9306233256887, miss=0 [wal_cb_test.cpp:WalWriteSyncer:156]
+
+[2024-05-08 18:55:06.002015+00:00][info][14661 wb_syncer_0]syncer_0 finished, has written objs=50000 in 34.712998 sec, iops=1440.382648597508, miss=0 [wal_cb_test.cpp:WalWriteSyncer:156]
+[2024-05-08 18:55:55.294819+00:00][info][15419 wb_syncer_0]syncer_0 finished, has written objs=50000 in 33.770362 sec, iops=1480.5882151929554, miss=0 [wal_cb_test.cpp:WalWriteSyncer:156]
+
+
+---- 2 syncer threads
+[2024-05-08 18:52:19.609857+00:00][info][13078 wb_syncer_1]syncer_1 finished, has written objs=26374 in 30.120739 sec, iops=875.6093268495172, miss=0 [wal_cb_test.cpp:WalWriteSyncer:156]
+[2024-05-08 18:52:19.609700+00:00][info][13077 wb_syncer_0]syncer_0 finished, has written objs=23626 in 30.12064 sec, iops=784.3790835785693, miss=0 [wal_cb_test.cpp:WalWriteSyncer:156]
+
+
+
+
+
+
+//////////////////////////////////////////////////////////
+
+
+=========
+1,  enable wal,  key size=20, value size=5678, write 1M objs
+
+[2023-12-17 05:45:00.900099+00:00][info][20353 testrocks]has written 260000 objs, obj size=5678 [main.cpp:BasicRW:32]
+[2023-12-17 05:45:06.307559+00:00][info][20353 testrocks]has written 270000 objs, obj size=5678 [main.cpp:BasicRW:32]
+[2023-12-17 05:45:12.072658+00:00][info][20353 testrocks]has written 280000 objs, obj size=5678 [main.cpp:BasicRW:32]
+[2023-12-17 05:45:16.804529+00:00][info][20353 testrocks]has written 290000 objs, obj size=5678 [main.cpp:BasicRW:32]
+[2023-12-17 05:45:27.145232+00:00][info][20353 testrocks]has written 300000 objs, obj size=5678 [main.cpp:BasicRW:32]
+[2023-12-17 05:45:33.814517+00:00][info][20353 testrocks]has written 310000 objs, obj size=5678 [main.cpp:BasicRW:32]
+[2023-12-17 05:45:40.070819+00:00][info][20353 testrocks]has written 320000 objs, obj size=5678 [main.cpp:BasicRW:32]
+
+====== Test 1
+
+disable wal, db-write only (no wal write), key=20b, value=5678
+=> Findings:   if multi-threads serialize on db.write (without wal),  then more threads do harm than good.
+One thread db write is good enough.
+
+1 thread, self-serialize, no locking-contention,  no-walog, just dbwrite:
+  => the single-thread cpu usage is 100%
+IOPS = 40k
+
+2 threads, serialized db-write, no walog:
+  => for the 2 threads, each uses cpu < 10%
+one thread IOPS = 7.8K
+2 threads = 15K
+
+4 threads, serialized db-write, no walog:
+each thread IOPS=3950
+4 threads = 15K
+
+8 threads, serailized db-write, no walog:
+each thread IOPS = 1700,
+16 threads = 14K
+
+
+========  Test 2
+
+wal-file write + fsync only, no db-write
+use a lock to serialize "grab dirty buf",  then all threads are free to write wal in parallel
+
+threads:  write wal-file IOPS
+1      4k
+2      8k
+4      11k
+8      11k
+
+
+========= Test 3
+
+wal-file write, then db write.
+step 1:  wait deq lock;  generate data,  pass deq_token to next,  write_wal file + fsync;
+step 2:  wait db lock;   write db;   pass db_token to next;
+
+1 thread:  IOPS = 4.5K
+2 threads:  IOPS = 6.5K
+4 threads: IOPS = 5200
+8 threads:  IOPS = 5000
+
+
+
+/////////////////////////////   2024/01/17:  data in ramfs
+In order to run rocks in ramfs, need to change code:
+1, walfile:
+PdfsWalFile::Open() {
+  fd = open(fname.c_str(), O_WRONLY | O_CREAT | O_DIRECT | O_DSYNC, 0644);
+  => remove O_DIRECT
+}
+
+2,  disable o_direct in kvs_config:
+static const kvs_config_t DEFAULT_KVS_CONFIG = {
+  .odirect_read = false,
+  .odirect_flush_compact = false,
+}
+
+1 db instance, write 2M objs (size=5.5k, key=20bytes)
+
+===  run 1:  enable rocksdb wal in the same ramfs dir:
+kvs_config:: disable_dbwal=false, sync=true
+
+(write-buf = 128M)
+[2024-01-18 03:05:19.229615+00:00][info][20367 testrocks]put objs=1000000 in 78.681436 seconds, iops=12709.4782560908 [testrocks.cpp:RocksBasicRw:414]
+[2024-01-18 04:14:11.315608+00:00][info][24578 testrocks]put objs=1000000 in 49.570337 seconds, iops=20173.35488358693 [testrocks.cpp:RocksBasicRw:414]
+[2024-01-18 04:19:34.650190+00:00][info][24996 testrocks]put objs=1000000 in 40.928977 seconds, iops=24432.567664713435 [testrocks.cpp:RocksBasicRw:414]
+[2024-01-18 04:20:54.532328+00:00][info][25380 testrocks]put objs=1000000 in 41.684923 seconds, iops=23989.488957434325 [testrocks.cpp:RocksBasicRw:414]
+[2024-01-18 04:23:20.069493+00:00][info][25755 testrocks]put objs=1000000 in 44.247051 seconds, iops=22600.376237503377 [testrocks.cpp:RocksBasicRw:414]
+[2024-01-18 05:00:41.758317+00:00][info][26750 testrocks]put objs=1000000 in 42.051396 seconds, iops=23780.423365730832 [testrocks.cpp:RocksBasicRw:414]
+write 2M objs
+[2024-01-18 05:56:05.001242+00:00][info][35937 testrocks]put objs=2000000 in 75.797846 seconds, iops=26385.97408163815 [testrocks.cpp:RocksBasicRw:419]
+
+(write 2M objs, write-buf =64M)
+[2024-01-18 06:00:49.398027+00:00][info][36499 testrocks]put objs=2000000 in 112.825506 seconds, iops=17726.48819319277 [testrocks.cpp:RocksBasicRw:419]
+[2024-01-18 06:04:56.597298+00:00][info][37179 testrocks]put objs=2000000 in 116.702652 seconds, iops=17137.57113248806 [testrocks.cpp:RocksBasicRw:419]
+[2024-01-18 06:07:42.363627+00:00][info][37818 testrocks]put objs=2000000 in 86.950946 seconds, iops=23001.474877570625 [testrocks.cpp:RocksBasicRw:419]
+[2024-01-18 06:10:42.108470+00:00][info][38476 testrocks]put objs=2000000 in 88.402359 seconds, iops=22623.830660446514 [testrocks.cpp:RocksBasicRw:419]
+
+
+I used one instance of rocksdb in ramfs,  WAL also in ramfs.   Create 2 M objects (size = 5.5k,  random key=20bytes) , repeated the test 10 times.
+                                                 IOPS                 runtime(seconds)
+Enable wal  (write to both wal and memtable):   write IOPS = 23K       86
+disable wal (only write to memtable):           write IOPS=  54K       36
+
+
+=== run 2:  disable rocksdb wal
+[2024-01-18 03:48:24.104136+00:00][info][22198 testrocks]put objs=1000000 in 15.035759 seconds, iops=66508.11575258688 [testrocks.cpp:RocksBasicRw:414]
+[2024-01-18 03:50:59.293404+00:00][info][22925 testrocks]put objs=1000000 in 20.745619 seconds, iops=48202.94829477009 [testrocks.cpp:RocksBasicRw:414]
+[2024-01-18 04:04:22.008531+00:00][info][23727 testrocks]put objs=1000000 in 15.961047 seconds, iops=62652.53150372904 [testrocks.cpp:RocksBasicRw:414]
+[2024-01-18 04:24:47.716888+00:00][info][26144 testrocks]put objs=1000000 in 17.09802 seconds, iops=58486.30426213093 [testrocks.cpp:RocksBasicRw:414]
+[2024-01-18 05:02:06.805523+00:00][info][27530 testrocks]put objs=1000000 in 17.21433 seconds, iops=58091.13686097571 [testrocks.cpp:RocksBasicRw:414]
+
+write 2.5M objs
+[2024-01-18 05:12:12.467638+00:00][info][28680 testrocks]put objs=2500000 in 46.189625 seconds, iops=54124.70874141109 [testrocks.cpp:RocksBasicRw:414]
+[2024-01-18 05:22:33.819432+00:00][info][29929 testrocks]put objs=2500000 in 41.484893 seconds, iops=60262.90100350506 [testrocks.cpp:RocksBasicRw:418]
+[2024-01-18 05:25:19.069822+00:00][info][30543 testrocks]put objs=2500000 in 47.673081 seconds, iops=52440.495717069345 [testrocks.cpp:RocksBasicRw:418]
+[2024-01-18 05:27:59.297168+00:00][info][31210 testrocks]put objs=2500000 in 43.724735 seconds, iops=57175.875394099014 [testrocks.cpp:RocksBasicRw:418]
+[2024-01-18 05:32:14.557444+00:00][info][32114 testrocks]put objs=2500000 in 44.082009 seconds, iops=56712.47878017538 [testrocks.cpp:RocksBasicRw:419]
+
+2.5M obj,  random keys
+[2024-01-18 05:41:22.090705+00:00][info][33707 testrocks]put objs=2500000 in 66.495025 seconds, iops=37596.797655162925 [testrocks.cpp:RocksBasicRw:419]
+[2024-01-18 05:44:17.788631+00:00][info][34364 testrocks]put objs=2500000 in 73.384994 seconds, iops=34066.91019147593 [testrocks.cpp:RocksBasicRw:419]
+
+[2024-01-18 06:24:24.645009+00:00][info][41618 testrocks]put objs=2000000 in 36.405065 seconds, iops=54937.41049494074 [testrocks.cpp:RocksBasicRw:419]
+
+2M objs, random keys (a lot of write Stall)
+2024/01/18-06:13:28.748501 140617902255040 [WARN] [/column_family.cc:971] [default] Stalling writes because we have 5 immutable memtables (waiting for flush),
+max_write_buffer_number is set to 6 rate 13469013
+2024/01/18-06:13:29.594915 140615568299776 [WARN] [/column_family.cc:991] [default] Stalling writes because we have 21 level-0 files rate 13421772
+
+[2024-01-18 06:14:53.606986+00:00][info][39427 testrocks]put objs=2000000 in 121.331462 seconds, iops=16483.770713980186 [testrocks.cpp:RocksBasicRw:419]
+
+(tuned:   cf_options.level0_slowdown_writes_trigger = 100;  cf_options.level0_stop_writes_trigger = 1000;
+allow many files in L0, memtable write faster than compaction)
+
+[2024-01-18 06:24:24.645009+00:00][info][41618 testrocks]put objs=2000000 in 36.405065 seconds, iops=54937.41049494074 [testrocks.cpp:RocksBasicRw:419]
+[2024-01-18 06:27:11.565458+00:00][info][42212 testrocks]put objs=2000000 in 38.212406 seconds, iops=52339.02309108722 [testrocks.cpp:RocksBasicRw:419]
+
